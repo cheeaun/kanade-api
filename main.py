@@ -47,12 +47,13 @@ class AnimeV1Handler(webapp.RequestHandler):
     def get(self):
         id = cgi.escape(self.request.get('id'))
         callback = cgi.escape(self.request.get('callback'))
+        reset = cgi.escape(self.request.get('_reset'))
         
         response = {'ok': True, 'result': None}
         
         if re.match(r"^\d+$", id):
             content = memcache.get(id)
-            if content is not None:
+            if content is not None and not reset:
                 response['result'] = content
             else:
                 q = db.GqlQuery('select * from AnimeV1 where id = :1', id)
@@ -60,12 +61,14 @@ class AnimeV1Handler(webapp.RequestHandler):
                 if result is not None and (datetime.now() - result.updated_datetime <= timedelta(hours=24)):
                     content = {
                         'id': result.id,
+                        'title': result.title,
                         'image': result.image,
                         'score': result.score,
                         'episodes': result.episodes,
                         'genres': result.genres
                     }
                     response['result'] = content
+                    memcache.set(id, content, 43200)
                 else:
                     try:
                         result = urlfetch.fetch(MALAPI + id, deadline = 10)
@@ -94,7 +97,7 @@ class AnimeV1Handler(webapp.RequestHandler):
         if callback and re.match(r'^[A-Za-z_$][A-Za-z0-9_$]*?$', callback): 
             json = callback + '(' + json + ')'
         
-        if response['ok'] is True:
+        if response['ok'] is True and response['result'] is not None:
             self.response.headers['Cache-Control'] = 'public; max-age=43200'
         self.response.headers['Content-Type'] = 'application/javascript; charset=utf-8'
         self.response.headers['Vary'] = 'Accept-Encoding'
