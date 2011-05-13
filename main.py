@@ -57,7 +57,7 @@ class AnimeV1Handler(webapp.RequestHandler):
             else:
                 q = db.GqlQuery('select * from AnimeV1 where id = :1', id)
                 result = q.get()
-                if result is not None and (datetime.now() - result.updated_datetime > timedelta(hours=24)):
+                if result is not None and (datetime.now() - result.updated_datetime <= timedelta(hours=24)):
                     content = {
                         'id': result.id,
                         'image': result.image,
@@ -90,7 +90,7 @@ class AnimeV1Handler(webapp.RequestHandler):
         else:
             response['ok'] = False
         
-        json = simplejson.dumps(response)
+        json = simplejson.dumps(response, sort_keys=True)
         if callback and re.match(r'^[A-Za-z_$][A-Za-z0-9_$]*?$', callback): 
             json = callback + '(' + json + ')'
         
