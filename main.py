@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import re, cgi
+import re, cgi, logging
 from datetime import datetime, timedelta
 
 from google.appengine.ext import webapp, db
@@ -22,7 +22,10 @@ from google.appengine.ext.webapp import util
 from google.appengine.api import urlfetch, memcache
 from django.utils import simplejson
 
+from bs4 import BeautifulSoup
+
 MALAPI = 'http://mal-api.com/anime/'
+MALSITE = 'http://myanimelist.net/anime/'
 
 class AnimeV1(db.Model):
     id = db.StringProperty(required=True)
@@ -58,6 +61,8 @@ class AnimeV1Handler(webapp.RequestHandler):
             else:
                 q = db.GqlQuery('select * from AnimeV1 where id = :1', id)
                 result = q.get()
+                originalScore = None
+                if result is not None: originalScore = result.score
                 if result is not None and (datetime.now() - result.updated_datetime <= timedelta(hours=24)):
                     content = {
                         'id': result.id,
@@ -71,21 +76,29 @@ class AnimeV1Handler(webapp.RequestHandler):
                     memcache.set(id, content, 43200)
                 else:
                     try:
+                        raise urlfetch.Error()
                         result = urlfetch.fetch(MALAPI + id, deadline = 10)
                         if result.status_code == 200:
                             content = formatResponse(result.content)
                             response['result'] = content
                             storeAnimeV1(id, content)
+                            if originalScore is not None and content['score'] != originalScore:
+                                logging.info('Anime Score Change: ' + content['title'] + ' ' + id + ': ' + str(originalScore) + ' -> ' + str(content['score']))
                         else:
                             raise urlfetch.Error()
                     except urlfetch.Error:
                         # Try one more time before giving up
                         try:
-                            result = urlfetch.fetch(MALAPI + id, deadline = 10)
+                            result = urlfetch.fetch(MALSITE + id, deadline = 10, allow_truncated = True)
                             if result.status_code == 200:
-                                content = formatResponse(result.content)
+                                content = formatResponse(result.content, True)
+                                if content is None:
+                                    raise urlfetch.Error()
+                                    return
                                 response['result'] = content
                                 storeAnimeV1(id, content)
+                                if originalScore is not None and content['score'] != originalScore:
+                                    logging.info('Anime Score Change: ' + content['title'] + ' ' + id + ': ' + str(originalScore) + ' -> ' + str(content['score']))
                             else:
                                 raise urlfetch.Error()
                         except urlfetch.Error:
@@ -105,15 +118,48 @@ class AnimeV1Handler(webapp.RequestHandler):
         self.response.headers['Connection'] = 'Keep-Alive'
         self.response.out.write(json)
 
-def formatResponse(content):
-    content = simplejson.loads(content)
-    return {
-        'title': content['title'],
-        'image': content['image_url'],
-        'score': content['members_score'],
-        'episodes': content['episodes'],
-        'genres': content['genres']
-    }
+def formatResponse(content, html=False):
+    if html:
+        # The ugly way to parse ugly HTML
+        
+        match = re.search(r'<h1>\s*<div[^<>]*>[^<>]*</div>\s*([^<>]+)\s*<', content, re.I | re.U)
+        title = match.group(1).decode('utf-8') if match else None
+        if title is None: return None
+        
+        match = re.search(r'=\d+">\s*<img\s+src="([^"<>\s]+)', content, re.I)
+        image = match.group(1) if match else None
+        if image is None: return None
+        
+        match = re.search(r'Score:\s*</span>\s*([\d.]+)\s*<', content, re.I)
+        score = float(match.group(1)) if match else 0
+        
+        match = re.search(r'Episodes:\s*</span>\s*(\d+)\s*<', content, re.I)
+        episodes = int(match.group(1)) if match else None
+        
+        match = re.search(r'Genres:\s*</span>\s*(.+)\s*</div', content, re.I)
+        genresHTML = match.group(1) if match else None
+        soup = BeautifulSoup(genresHTML)
+        genresA = soup.findAll('a')
+        genres = []
+        for a in genresA:
+            genres.append(str(a.string))
+        
+        return {
+            'title': title,
+            'image': image,
+            'score': score,
+            'episodes': episodes,
+            'genres': genres
+        }
+    else:
+        data = simplejson.loads(content)
+        return {
+            'title': data['title'],
+            'image': data['image_url'],
+            'score': data['members_score'],
+            'episodes': data['episodes'],
+            'genres': data['genres']
+        }
 
 def storeAnimeV1(id, data):
     memcache.set(id, data, 43200)
