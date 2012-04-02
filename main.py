@@ -17,10 +17,9 @@
 import re, cgi, logging
 from datetime import datetime, timedelta
 
-from google.appengine.ext import webapp, db
-from google.appengine.ext.webapp import util
+import webapp2, json
+from google.appengine.ext import db
 from google.appengine.api import urlfetch, memcache
-from django.utils import simplejson
 
 from bs4 import BeautifulSoup
 
@@ -36,7 +35,7 @@ class AnimeV1(db.Model):
     genres = db.StringListProperty()
     updated_datetime = db.DateTimeProperty(auto_now=True)
 
-class MainHandler(webapp.RequestHandler):
+class MainHandler(webapp2.RequestHandler):
     def get(self):
         self.response.out.write('<!DOCTYPE html>\
 <title>Kanade</title>\
@@ -46,7 +45,7 @@ class MainHandler(webapp.RequestHandler):
 <p>I am powered by <a href="http://mal-api.com/">MyAnimeList Unofficial API</a>, <a href="http://myanimelist.net/">MyAnimeList</a> itself &amp; <a href="http://code.google.com/appengine/">Google App Engine</a>.</p>\
 <p><a href="http://twitter.com/cheeaun">@cheeaun</a> &middot; <a href="http://github.com/cheeaun/kanade-api">GitHub</a></p>')
 
-class AnimeV1Handler(webapp.RequestHandler):
+class AnimeV1Handler(webapp2.RequestHandler):
     def get(self):
         id = cgi.escape(self.request.get('id'))
         callback = cgi.escape(self.request.get('callback'))
@@ -76,7 +75,6 @@ class AnimeV1Handler(webapp.RequestHandler):
                     memcache.set(id, content, 43200)
                 else:
                     try:
-                        raise urlfetch.Error()
                         result = urlfetch.fetch(MALAPI + id, deadline = 10)
                         if result.status_code == 200:
                             content = formatResponse(result.content)
@@ -106,9 +104,9 @@ class AnimeV1Handler(webapp.RequestHandler):
         else:
             response['ok'] = False
         
-        json = simplejson.dumps(response, sort_keys=True)
+        jsonData = json.dumps(response, sort_keys=True)
         if callback and re.match(r'^[A-Za-z_$][A-Za-z0-9_$]*?$', callback): 
-            json = callback + '(' + json + ')'
+            jsonData = callback + '(' + jsonData + ')'
         
         if response['ok'] is True and response['result'] is not None:
             self.response.headers['Cache-Control'] = 'public; max-age=43200'
@@ -116,7 +114,7 @@ class AnimeV1Handler(webapp.RequestHandler):
         self.response.headers['Vary'] = 'Accept-Encoding'
         self.response.headers['Proxy-Connection'] = 'Keep-Alive'
         self.response.headers['Connection'] = 'Keep-Alive'
-        self.response.out.write(json)
+        self.response.out.write(jsonData)
 
 def formatResponse(content, html=False):
     if html:
@@ -126,8 +124,9 @@ def formatResponse(content, html=False):
         title = match.group(1).decode('utf-8') if match else None
         if title is None: return None
         
-        match = re.search(r'=\d+">\s*<img\s+src="([^"<>\s]+)', content, re.I)
+        match = re.search(r'">\s*<img\s+src="([^"<>\s]+)', content, re.I)
         image = match.group(1) if match else None
+        print image
         if image is None: return None
         
         match = re.search(r'Score:\s*</span>\s*([\d.]+)\s*<', content, re.I)
@@ -152,7 +151,7 @@ def formatResponse(content, html=False):
             'genres': genres
         }
     else:
-        data = simplejson.loads(content)
+        data = json.loads(content)
         return {
             'title': data['title'],
             'image': data['image_url'],
@@ -188,12 +187,7 @@ def storeAnimeV1(id, data):
         anime.genres = genres
     anime.put()
 
-def main():
-    application = webapp.WSGIApplication([
+app = webapp2.WSGIApplication([
         ('/', MainHandler),
         ('/v1/anime', AnimeV1Handler)
     ], debug=True)
-    util.run_wsgi_app(application)
-
-if __name__ == '__main__':
-    main()

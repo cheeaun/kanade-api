@@ -9,7 +9,7 @@ encoding; that's the tree builder's job.
 import codecs
 from htmlentitydefs import codepoint2name
 import re
-import types
+import warnings
 
 # Autodetects character encodings. Very useful.
 # Download from http://chardet.feedparser.org/
@@ -28,6 +28,10 @@ try:
 except ImportError:
     pass
 
+xml_encoding_re = re.compile(
+    '^<\?.*encoding=[\'"](.*?)[\'"].*\?>'.encode(), re.I)
+html_meta_re = re.compile(
+    '<\s*meta[^>]+charset\s*=\s*["\']?([^>]*?)[ /;\'">]'.encode(), re.I)
 
 class EntitySubstitution(object):
 
@@ -37,12 +41,12 @@ class EntitySubstitution(object):
         lookup = {}
         reverse_lookup = {}
         characters = []
-        for codepoint, name in codepoint2name.items():
+        for codepoint, name in list(codepoint2name.items()):
             if codepoint == 34:
                 # There's no point in turning the quotation mark into
                 # &quot;, unless it happens within an attribute value, which
                 # is handled elsewhere.
-                continue;
+                continue
             character = unichr(codepoint)
             characters.append(character)
             lookup[character] = name
@@ -52,13 +56,12 @@ class EntitySubstitution(object):
     (CHARACTER_TO_HTML_ENTITY, HTML_ENTITY_TO_CHARACTER,
      CHARACTER_TO_HTML_ENTITY_RE) = _populate_class_variables()
 
-
     CHARACTER_TO_XML_ENTITY = {
-        "'" : "apos",
-        '"' : "quot",
-        "&" : "amp",
-        "<" : "lt",
-        ">" : "gt",
+        "'": "apos",
+        '"': "quot",
+        "&": "amp",
+        "<": "lt",
+        ">": "gt",
         }
 
     BARE_AMPERSAND_OR_BRACKET = re.compile("([<>]|"
@@ -157,8 +160,8 @@ class UnicodeDammit:
     # meta tags to the corresponding Python codec names. It only covers
     # values that aren't in Python's aliases and can't be determined
     # by the heuristics in find_codec.
-    CHARSET_ALIASES = { "macintosh" : "mac-roman",
-                        "x-sjis" : "shift-jis" }
+    CHARSET_ALIASES = {"macintosh": "mac-roman",
+                       "x-sjis": "shift-jis"}
 
     ENCODINGS_WITH_SMART_QUOTES = [
         "windows-1252",
@@ -167,16 +170,20 @@ class UnicodeDammit:
         ]
 
     def __init__(self, markup, override_encodings=[],
-                 smart_quotes_to=None, isHTML=False):
+                 smart_quotes_to=None, is_html=False):
         self.declared_html_encoding = None
-        self.markup, document_encoding, sniffed_encoding = \
-                     self._detectEncoding(markup, isHTML)
         self.smart_quotes_to = smart_quotes_to
         self.tried_encodings = []
+        self.contains_replacement_characters = False
+
         if markup == '' or isinstance(markup, unicode):
+            self.markup = markup
+            self.unicode_markup = unicode(markup)
             self.original_encoding = None
-            self.unicode = unicode(markup)
             return
+
+        self.markup, document_encoding, sniffed_encoding = \
+                     self._detectEncoding(markup, is_html)
 
         u = None
         for proposed_encoding in (
@@ -197,15 +204,34 @@ class UnicodeDammit:
                 if u:
                     break
 
-        self.unicode = u
-        if not u: self.original_encoding = None
+        # As an absolute last resort, try the encodings again with
+        # character replacement.
+        if not u:
+            for proposed_encoding in (
+                override_encodings + [
+                    document_encoding, sniffed_encoding, "utf-8", "windows-1252"]):
+                if proposed_encoding != "ascii":
+                    u = self._convert_from(proposed_encoding, "replace")
+                if u is not None:
+                    warnings.warn(
+                        UnicodeWarning(
+                            "Some characters could not be decoded, and were "
+                            "replaced with REPLACEMENT CHARACTER."))
+                    self.contains_replacement_characters = True
+                    break
+
+        # We could at this point force it to ASCII, but that would
+        # destroy so much data that I think giving up is better
+        self.unicode_markup = u
+        if not u:
+            self.original_encoding = None
 
     def _sub_ms_char(self, match):
         """Changes a MS smart quote character to an XML or HTML
         entity."""
         orig = match.group(1)
         sub = self.MS_CHARS.get(orig)
-        if type(sub) == types.TupleType:
+        if type(sub) == tuple:
             if self.smart_quotes_to == 'xml':
                 sub = '&#x'.encode() + sub[1].encode() + ';'.encode()
             else:
@@ -214,34 +240,35 @@ class UnicodeDammit:
             sub = sub.encode()
         return sub
 
-    def _convert_from(self, proposed):
+    def _convert_from(self, proposed, errors="strict"):
         proposed = self.find_codec(proposed)
-        if not proposed or proposed in self.tried_encodings:
+        if not proposed or (proposed, errors) in self.tried_encodings:
             return None
-        self.tried_encodings.append(proposed)
+        self.tried_encodings.append((proposed, errors))
         markup = self.markup
 
         # Convert smart quotes to HTML if coming from an encoding
         # that might have them.
         if (self.smart_quotes_to is not None
             and proposed.lower() in self.ENCODINGS_WITH_SMART_QUOTES):
-            smart_quotes_re = "([\x80-\x9f])"
+            smart_quotes_re = b"([\x80-\x9f])"
             smart_quotes_compiled = re.compile(smart_quotes_re)
             markup = smart_quotes_compiled.sub(self._sub_ms_char, markup)
 
         try:
-            # print "Trying to convert document to %s" % proposed
-            u = self._to_unicode(markup, proposed)
+            #print "Trying to convert document to %s (errors=%s)" % (
+            #    proposed, errors)
+            u = self._to_unicode(markup, proposed, errors)
             self.markup = u
             self.original_encoding = proposed
-        except Exception, e:
-            # print "That didn't work!"
-            # print e
+        except Exception as e:
+            #print "That didn't work!"
+            #print e
             return None
         #print "Correct encoding: %s" % proposed
         return self.markup
 
-    def _to_unicode(self, data, encoding):
+    def _to_unicode(self, data, encoding, errors="strict"):
         '''Given a string and its encoding, decodes the string into Unicode.
         %encoding is a string recognized by encodings.aliases'''
 
@@ -263,10 +290,10 @@ class UnicodeDammit:
         elif data[:4] == '\xff\xfe\x00\x00':
             encoding = 'utf-32le'
             data = data[4:]
-        newdata = unicode(data, encoding)
+        newdata = unicode(data, encoding, errors)
         return newdata
 
-    def _detectEncoding(self, xml_data, isHTML=False):
+    def _detectEncoding(self, xml_data, is_html=False):
         """Given a document, tries to detect its XML encoding."""
         xml_encoding = sniffed_xml_encoding = None
         try:
@@ -316,16 +343,13 @@ class UnicodeDammit:
                 pass
         except:
             xml_encoding_match = None
-        xml_encoding_re = '^<\?.*encoding=[\'"](.*?)[\'"].*\?>'.encode()
-        xml_encoding_match = re.compile(xml_encoding_re).match(xml_data)
-        if not xml_encoding_match and isHTML:
-            meta_re = '<\s*meta[^>]+charset=([^>]*?)[;\'">]'.encode()
-            regexp = re.compile(meta_re, re.I)
-            xml_encoding_match = regexp.search(xml_data)
+        xml_encoding_match = xml_encoding_re.match(xml_data)
+        if not xml_encoding_match and is_html:
+            xml_encoding_match = html_meta_re.search(xml_data)
         if xml_encoding_match is not None:
             xml_encoding = xml_encoding_match.groups()[0].decode(
                 'ascii').lower()
-            if isHTML:
+            if is_html:
                 self.declared_html_encoding = xml_encoding
             if sniffed_xml_encoding and \
                (xml_encoding in ('iso-10646-ucs-2', 'ucs-2', 'csunicode',
@@ -335,7 +359,6 @@ class UnicodeDammit:
                 xml_encoding = sniffed_xml_encoding
         return xml_data, xml_encoding, sniffed_xml_encoding
 
-
     def find_codec(self, charset):
         return self._codec(self.CHARSET_ALIASES.get(charset, charset)) \
                or (charset and self._codec(charset.replace("-", ""))) \
@@ -343,7 +366,8 @@ class UnicodeDammit:
                or charset
 
     def _codec(self, charset):
-        if not charset: return charset
+        if not charset:
+            return charset
         codec = None
         try:
             codecs.lookup(charset)
@@ -353,6 +377,7 @@ class UnicodeDammit:
         return codec
 
     EBCDIC_TO_ASCII_MAP = None
+
     def _ebcdic_to_ascii(self, s):
         c = self.__class__
         if not c.EBCDIC_TO_ASCII_MAP:
@@ -374,39 +399,39 @@ class UnicodeDammit:
                     90,244,245,246,247,248,249,48,49,50,51,52,53,54,55,56,57,
                     250,251,252,253,254,255)
             import string
-            c.EBCDIC_TO_ASCII_MAP = string.maketrans( \
-            ''.join(map(chr, range(256))), ''.join(map(chr, emap)))
+            c.EBCDIC_TO_ASCII_MAP = string.maketrans(
+            ''.join(map(chr, list(range(256)))), ''.join(map(chr, emap)))
         return s.translate(c.EBCDIC_TO_ASCII_MAP)
 
-    MS_CHARS = { '\x80' : ('euro', '20AC'),
-                 '\x81' : ' ',
-                 '\x82' : ('sbquo', '201A'),
-                 '\x83' : ('fnof', '192'),
-                 '\x84' : ('bdquo', '201E'),
-                 '\x85' : ('hellip', '2026'),
-                 '\x86' : ('dagger', '2020'),
-                 '\x87' : ('Dagger', '2021'),
-                 '\x88' : ('circ', '2C6'),
-                 '\x89' : ('permil', '2030'),
-                 '\x8A' : ('Scaron', '160'),
-                 '\x8B' : ('lsaquo', '2039'),
-                 '\x8C' : ('OElig', '152'),
-                 '\x8D' : '?',
-                 '\x8E' : ('#x17D', '17D'),
-                 '\x8F' : '?',
-                 '\x90' : '?',
-                 '\x91' : ('lsquo', '2018'),
-                 '\x92' : ('rsquo', '2019'),
-                 '\x93' : ('ldquo', '201C'),
-                 '\x94' : ('rdquo', '201D'),
-                 '\x95' : ('bull', '2022'),
-                 '\x96' : ('ndash', '2013'),
-                 '\x97' : ('mdash', '2014'),
-                 '\x98' : ('tilde', '2DC'),
-                 '\x99' : ('trade', '2122'),
-                 '\x9a' : ('scaron', '161'),
-                 '\x9b' : ('rsaquo', '203A'),
-                 '\x9c' : ('oelig', '153'),
-                 '\x9d' : '?',
-                 '\x9e' : ('#x17E', '17E'),
-                 '\x9f' : ('Yuml', ''),}
+    MS_CHARS = {b'\x80': ('euro', '20AC'),
+                b'\x81': ' ',
+                b'\x82': ('sbquo', '201A'),
+                b'\x83': ('fnof', '192'),
+                b'\x84': ('bdquo', '201E'),
+                b'\x85': ('hellip', '2026'),
+                b'\x86': ('dagger', '2020'),
+                b'\x87': ('Dagger', '2021'),
+                b'\x88': ('circ', '2C6'),
+                b'\x89': ('permil', '2030'),
+                b'\x8A': ('Scaron', '160'),
+                b'\x8B': ('lsaquo', '2039'),
+                b'\x8C': ('OElig', '152'),
+                b'\x8D': '?',
+                b'\x8E': ('#x17D', '17D'),
+                b'\x8F': '?',
+                b'\x90': '?',
+                b'\x91': ('lsquo', '2018'),
+                b'\x92': ('rsquo', '2019'),
+                b'\x93': ('ldquo', '201C'),
+                b'\x94': ('rdquo', '201D'),
+                b'\x95': ('bull', '2022'),
+                b'\x96': ('ndash', '2013'),
+                b'\x97': ('mdash', '2014'),
+                b'\x98': ('tilde', '2DC'),
+                b'\x99': ('trade', '2122'),
+                b'\x9a': ('scaron', '161'),
+                b'\x9b': ('rsaquo', '203A'),
+                b'\x9c': ('oelig', '153'),
+                b'\x9d': '?',
+                b'\x9e': ('#x17E', '17E'),
+                b'\x9f': ('Yuml', ''),}

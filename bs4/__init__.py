@@ -3,35 +3,44 @@ Elixir and Tonic
 "The Screen-Scraper's Friend"
 http://www.crummy.com/software/BeautifulSoup/
 
-Beautiful Soup uses a plug-in parser to parse a (possibly invalid) XML
-or HTML document into a tree representation. The parser does the work
-of building a parse tree, and Beautiful Soup provides provides methods
-and Pythonic idioms that make it easy to navigate, search, and modify
-the parse tree.
+Beautiful Soup uses a pluggable XML or HTML parser to parse a
+(possibly invalid) document into a tree representation. Beautiful Soup
+provides provides methods and Pythonic idioms that make it easy to
+navigate, search, and modify the parse tree.
 
-Beautiful Soup works with Python 2.5 and up. It works better if lxml
-or html5lib is installed.
+Beautiful Soup works with Python 2.6 and up. It works better if lxml
+and/or html5lib is installed.
 
 For more than you ever wanted to know about Beautiful Soup, see the
 documentation:
-http://www.crummy.com/software/BeautifulSoup/documentation.html
+http://www.crummy.com/software/BeautifulSoup/bs4/doc/
 """
-from __future__ import generators
 
 __author__ = "Leonard Richardson (leonardr@segfault.org)"
-__version__ = "4.0.0a"
-__copyright__ = "Copyright (c) 2004-2011 Leonard Richardson"
+__version__ = "4.0.2"
+__copyright__ = "Copyright (c) 2004-2012 Leonard Richardson"
 __license__ = "MIT"
 
 __all__ = ['BeautifulSoup']
 
 import re
+import warnings
 
-from util import isList, buildSet
-from builder import builder_registry
-from dammit import UnicodeDammit
-from element import DEFAULT_OUTPUT_ENCODING, NavigableString, Tag
-
+from .builder import builder_registry
+from .dammit import UnicodeDammit
+from .element import (
+    CData,
+    Comment,
+    DEFAULT_OUTPUT_ENCODING,
+    Declaration,
+    Doctype,
+    NavigableString,
+    PageElement,
+    ProcessingInstruction,
+    ResultSet,
+    SoupStrainer,
+    Tag,
+    )
 
 class BeautifulSoup(Tag):
     """
@@ -59,19 +68,75 @@ class BeautifulSoup(Tag):
 
     # If the end-user gives no indication which tree builder they
     # want, look for one with these features.
-    DEFAULT_BUILDER_FEATURES = ['html']
+    DEFAULT_BUILDER_FEATURES = ['html', 'fast']
 
     # Used when determining whether a text node is all whitespace and
     # can be replaced with a single space. A text node that contains
     # fancy Unicode spaces (usually non-breaking) should be left
     # alone.
-    STRIP_ASCII_SPACES = { 9: None, 10: None, 12: None, 13: None, 32: None, }
+    STRIP_ASCII_SPACES = {9: None, 10: None, 12: None, 13: None, 32: None, }
 
     def __init__(self, markup="", features=None, builder=None,
-                 parse_only=None, from_encoding=None):
+                 parse_only=None, from_encoding=None, **kwargs):
         """The Soup object is initialized as the 'root tag', and the
         provided markup (which can be a string or a file-like object)
         is fed into the underlying parser."""
+
+        if 'convertEntities' in kwargs:
+            warnings.warn(
+                "BS4 does not respect the convertEntities argument to the "
+                "BeautifulSoup constructor. Entities are always converted "
+                "to Unicode characters.")
+
+        if 'markupMassage' in kwargs:
+            del kwargs['markupMassage']
+            warnings.warn(
+                "BS4 does not respect the markupMassage argument to the "
+                "BeautifulSoup constructor. The tree builder is responsible "
+                "for any necessary markup massage.")
+
+        if 'smartQuotesTo' in kwargs:
+            del kwargs['smartQuotesTo']
+            warnings.warn(
+                "BS4 does not respect the smartQuotesTo argument to the "
+                "BeautifulSoup constructor. Smart quotes are always converted "
+                "to Unicode characters.")
+
+        if 'selfClosingTags' in kwargs:
+            del kwargs['selfClosingTags']
+            warnings.warn(
+                "BS4 does not respect the selfClosingTags argument to the "
+                "BeautifulSoup constructor. The tree builder is responsible "
+                "for understanding self-closing tags.")
+
+        if 'isHTML' in kwargs:
+            del kwargs['isHTML']
+            warnings.warn(
+                "BS4 does not respect the isHTML argument to the "
+                "BeautifulSoup constructor. You can pass in features='html' "
+                "or features='xml' to get a builder capable of handling "
+                "one or the other.")
+
+        def deprecated_argument(old_name, new_name):
+            if old_name in kwargs:
+                warnings.warn(
+                    'The "%s" argument to the BeautifulSoup constructor '
+                    'has been renamed to "%s."' % (old_name, new_name))
+                value = kwargs[old_name]
+                del kwargs[old_name]
+                return value
+            return None
+
+        parse_only = parse_only or deprecated_argument(
+            "parseOnlyThese", "parse_only")
+
+        from_encoding = from_encoding or deprecated_argument(
+            "fromEncoding", "from_encoding")
+
+        if len(kwargs) > 0:
+            arg = kwargs.keys().pop()
+            raise TypeError(
+                "__init__() got an unexpected keyword argument '%s'" % arg)
 
         if builder is None:
             if isinstance(features, basestring):
@@ -95,7 +160,8 @@ class BeautifulSoup(Tag):
 
         if hasattr(markup, 'read'):        # It's a file-type object.
             markup = markup.read()
-        self.markup, self.original_encoding, self.declared_html_encoding = (
+        (self.markup, self.original_encoding, self.declared_html_encoding,
+         self.contains_replacement_characters) = (
             self.builder.prepare_markup(markup, from_encoding))
 
         try:
@@ -103,10 +169,10 @@ class BeautifulSoup(Tag):
         except StopParsing:
             pass
 
-        # Clear out the markup and the builder so they can be CGed.
+        # Clear out the markup and remove the builder's circular
+        # reference to this object.
         self.markup = None
         self.builder.soup = None
-        self.builder = None
 
     def _feed(self):
         # Convert the document to Unicode.
@@ -127,6 +193,22 @@ class BeautifulSoup(Tag):
         self.tagStack = []
         self.pushTag(self)
 
+    def new_tag(self, name, namespace=None, nsprefix=None, **attrs):
+        """Create a new tag associated with this soup."""
+        return Tag(None, self.builder, name, namespace, nsprefix, attrs)
+
+    def new_string(self, s):
+        """Create a new NavigableString associated with this soup."""
+        navigable = NavigableString(s)
+        navigable.setup()
+        return navigable
+
+    def insert_before(self, successor):
+        raise ValueError("BeautifulSoup objects don't support insert_before().")
+
+    def insert_after(self, successor):
+        raise ValueError("BeautifulSoup objects don't support insert_after().")
+
     def popTag(self):
         tag = self.tagStack.pop()
         #print "Pop", tag.name
@@ -145,7 +227,7 @@ class BeautifulSoup(Tag):
         if self.currentData:
             currentData = u''.join(self.currentData)
             if (currentData.translate(self.STRIP_ASCII_SPACES) == '' and
-                not buildSet([tag.name for tag in self.tagStack]).intersection(
+                not set([tag.name for tag in self.tagStack]).intersection(
                     self.builder.preserve_whitespace_tags)):
                 if '\n' in currentData:
                     currentData = '\n'
@@ -161,14 +243,13 @@ class BeautifulSoup(Tag):
 
     def object_was_parsed(self, o):
         """Add an object to the parse tree."""
-        o.setup(self.currentTag, self.previous)
-        if self.previous:
-            self.previous.next = o
-        self.previous = o
+        o.setup(self.currentTag, self.previous_element)
+        if self.previous_element:
+            self.previous_element.next_element = o
+        self.previous_element = o
         self.currentTag.contents.append(o)
 
-
-    def _popToTag(self, name, inclusivePop=True):
+    def _popToTag(self, name, nsprefix=None, inclusivePop=True):
         """Pops the tag stack up to and including the most recent
         instance of the given tag. If inclusivePop is false, pops the tag
         stack up to but *not* including the most recent instqance of
@@ -179,9 +260,11 @@ class BeautifulSoup(Tag):
 
         numPops = 0
         mostRecentTag = None
-        for i in range(len(self.tagStack)-1, 0, -1):
-            if name == self.tagStack[i].name:
-                numPops = len(self.tagStack)-i
+
+        for i in range(len(self.tagStack) - 1, 0, -1):
+            if (name == self.tagStack[i].name
+                and nsprefix == self.tagStack[i].nsprefix == nsprefix):
+                numPops = len(self.tagStack) - i
                 break
         if not inclusivePop:
             numPops = numPops - 1
@@ -190,7 +273,7 @@ class BeautifulSoup(Tag):
             mostRecentTag = self.popTag()
         return mostRecentTag
 
-    def handle_starttag(self, name, attrs):
+    def handle_starttag(self, name, namespace, nsprefix, attrs):
         """Push a start tag on to the stack.
 
         If this method returns None, the tag was rejected by the
@@ -199,44 +282,44 @@ class BeautifulSoup(Tag):
         don't call handle_endtag.
         """
 
-        #print "Start tag %s: %s" % (name, attrs)
+        # print "Start tag %s: %s" % (name, attrs)
         self.endData()
 
         if (self.parse_only and len(self.tagStack) <= 1
             and (self.parse_only.text
-                 or not self.parse_only.searchTag(name, attrs))):
+                 or not self.parse_only.search_tag(name, attrs))):
             return None
 
-        tag = Tag(self, self.builder, name, attrs, self.currentTag,
-                  self.previous)
+        tag = Tag(self, self.builder, name, namespace, nsprefix, attrs,
+                  self.currentTag, self.previous_element)
         if tag is None:
             return tag
-        if self.previous:
-            self.previous.next = tag
-        self.previous = tag
+        if self.previous_element:
+            self.previous_element.next_element = tag
+        self.previous_element = tag
         self.pushTag(tag)
         return tag
 
-
-    def handle_endtag(self, name):
+    def handle_endtag(self, name, nsprefix=None):
         #print "End tag: " + name
         self.endData()
-        self._popToTag(name)
+        self._popToTag(name, nsprefix)
 
     def handle_data(self, data):
         self.currentData.append(data)
 
     def decode(self, pretty_print=False,
                eventual_encoding=DEFAULT_OUTPUT_ENCODING,
-               substitute_html_entities=False):
+               formatter="minimal"):
         """Returns a string or Unicode representation of this document.
         To get Unicode, pass None for encoding."""
+
         if self.is_xml:
             # Print the XML declaration
             encoding_part = ''
             if eventual_encoding != None:
                 encoding_part = ' encoding="%s"' % eventual_encoding
-            prefix = u'<?xml version="1.0"%s>\n' % encoding_part
+            prefix = u'<?xml version="1.0"%s?>\n' % encoding_part
         else:
             prefix = u''
         if not pretty_print:
@@ -244,8 +327,17 @@ class BeautifulSoup(Tag):
         else:
             indent_level = 0
         return prefix + super(BeautifulSoup, self).decode(
-            indent_level, eventual_encoding,
-            substitute_html_entities)
+            indent_level, eventual_encoding, formatter)
+
+class BeautifulStoneSoup(BeautifulSoup):
+    """Deprecated interface to an XML parser."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs['features'] = 'xml'
+        warnings.warn(
+            'The BeautifulStoneSoup class is deprecated. Instead of using '
+            'it, pass features="xml" into the BeautifulSoup constructor.')
+        super(BeautifulStoneSoup, self).__init__(*args, **kwargs)
 
 
 class StopParsing(Exception):
