@@ -50,9 +50,9 @@ class AnimeV1Handler(webapp2.RequestHandler):
         id = cgi.escape(self.request.get('id'))
         callback = cgi.escape(self.request.get('callback'))
         reset = cgi.escape(self.request.get('_reset'))
-        
+
         response = {'ok': True, 'result': None}
-        
+
         if re.match(r"^\d+$", id):
             content = memcache.get(id)
             if content is not None and not reset:
@@ -75,9 +75,12 @@ class AnimeV1Handler(webapp2.RequestHandler):
                     memcache.set(id, content, 43200)
                 else:
                     try:
-                        result = urlfetch.fetch(MALAPI + id, deadline = 10)
+                        result = urlfetch.fetch(MALSITE + id, deadline = 10, allow_truncated = True)
                         if result.status_code == 200:
-                            content = formatResponse(result.content)
+                            content = formatResponse(result.content, True)
+                            if content is None:
+                                raise urlfetch.Error()
+                                return
                             response['result'] = content
                             storeAnimeV1(id, content)
                             if originalScore is not None and content['score'] != originalScore:
@@ -87,12 +90,9 @@ class AnimeV1Handler(webapp2.RequestHandler):
                     except urlfetch.Error:
                         # Try one more time before giving up
                         try:
-                            result = urlfetch.fetch(MALSITE + id, deadline = 10, allow_truncated = True)
+                            result = urlfetch.fetch(MALAPI + id, deadline = 10)
                             if result.status_code == 200:
-                                content = formatResponse(result.content, True)
-                                if content is None:
-                                    raise urlfetch.Error()
-                                    return
+                                content = formatResponse(result.content)
                                 response['result'] = content
                                 storeAnimeV1(id, content)
                                 if originalScore is not None and content['score'] != originalScore:
@@ -103,38 +103,39 @@ class AnimeV1Handler(webapp2.RequestHandler):
                             response['ok'] = False
         else:
             response['ok'] = False
-        
+
         jsonData = json.dumps(response, sort_keys=True)
-        if callback and re.match(r'^[A-Za-z_$][A-Za-z0-9_$]*?$', callback): 
+        if callback and re.match(r'^[A-Za-z_$][A-Za-z0-9_$]*?$', callback):
             jsonData = callback + '(' + jsonData + ')'
-        
+
         if response['ok'] is True and response['result'] is not None:
             self.response.headers['Cache-Control'] = 'public; max-age=43200'
         self.response.headers['Content-Type'] = 'application/javascript; charset=utf-8'
         self.response.headers['Vary'] = 'Accept-Encoding'
         self.response.headers['Proxy-Connection'] = 'Keep-Alive'
         self.response.headers['Connection'] = 'Keep-Alive'
+        self.response.headers['Access-Control-Allow-Origin'] = '*'
         self.response.out.write(jsonData)
 
 def formatResponse(content, html=False):
     if html:
         # The ugly way to parse ugly HTML
-        
+
         match = re.search(r'<h1>\s*<div[^<>]*>[^<>]*</div>\s*([^<>]+)\s*<', content, re.I | re.U)
         title = match.group(1).decode('utf-8') if match else None
         if title is None: return None
-        
+
         match = re.search(r'">\s*<img\s+src="([^"<>\s]+)', content, re.I)
         image = match.group(1) if match else None
         print image
         if image is None: return None
-        
+
         match = re.search(r'Score:\s*</span>\s*([\d.]+)\s*<', content, re.I)
         score = float(match.group(1)) if match else 0
-        
+
         match = re.search(r'Episodes:\s*</span>\s*(\d+)\s*<', content, re.I)
         episodes = int(match.group(1)) if match else None
-        
+
         match = re.search(r'Genres:\s*</span>\s*(.+)\s*</div', content, re.I)
         genresHTML = match.group(1) if match else None
         soup = BeautifulSoup(genresHTML)
@@ -142,7 +143,7 @@ def formatResponse(content, html=False):
         genres = []
         for a in genresA:
             genres.append(str(a.string))
-        
+
         return {
             'title': title,
             'image': image,
@@ -164,12 +165,12 @@ def storeAnimeV1(id, data):
     memcache.set(id, data, 43200)
     q = db.GqlQuery('select * from AnimeV1 where id = :1', id)
     anime = q.get()
-    
+
     # If genres is string, make it a list, just in case
     genres = data['genres']
     if genres is not None and isinstance(genres, str):
         genres = [genres]
-    
+
     if not anime:
         anime = AnimeV1(
             id = id,
