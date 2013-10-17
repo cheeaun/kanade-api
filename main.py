@@ -75,12 +75,11 @@ class AnimeV1Handler(webapp2.RequestHandler):
                     memcache.set(id, content, 43200)
                 else:
                     try:
-                        result = urlfetch.fetch(MALSITE + id, deadline = 10, allow_truncated = True)
+                        logging.info('Fetching ' + MALAPI + id)
+                        result = urlfetch.fetch(MALAPI + id, deadline = 10)
+                        logging.info(result.status_code)
                         if result.status_code == 200:
-                            content = formatResponse(result.content, True)
-                            if content is None:
-                                raise urlfetch.Error()
-                                return
+                            content = formatResponse(result.content)
                             response['result'] = content
                             storeAnimeV1(id, content)
                             if originalScore is not None and content['score'] != originalScore:
@@ -90,9 +89,14 @@ class AnimeV1Handler(webapp2.RequestHandler):
                     except urlfetch.Error:
                         # Try one more time before giving up
                         try:
-                            result = urlfetch.fetch(MALAPI + id, deadline = 10)
+                            logging.info('Fetching ' + MALSITE + id)
+                            result = urlfetch.fetch(MALSITE + id, deadline = 10, allow_truncated = True)
+                            logging.info(result.content)
                             if result.status_code == 200:
-                                content = formatResponse(result.content)
+                                content = formatResponse(result.content, True)
+                                if content is None:
+                                    raise urlfetch.Error()
+                                    return
                                 response['result'] = content
                                 storeAnimeV1(id, content)
                                 if originalScore is not None and content['score'] != originalScore:
